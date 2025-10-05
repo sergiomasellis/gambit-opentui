@@ -1,5 +1,7 @@
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createOpenRouter, type OpenRouterProviderOptions } from "@openrouter/ai-sdk-provider";
 import { refererHeader, titleHeader } from "../config";
+
+export type ReasoningEffort = "low" | "medium" | "high";
 
 export function createModelSelector(apiKey: string) {
   const openrouter = createOpenRouter({
@@ -11,5 +13,5 @@ export function createModelSelector(apiKey: string) {
     },
   });
 
-  return (modelId: string) => openrouter(modelId);
+  return (modelId: string, settings?: OpenRouterProviderOptions) => openrouter(modelId, settings);
 }

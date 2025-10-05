@@ -1,4 +1,5 @@
-import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
+import { TextAttributes, type ParsedKey, type ScrollBoxRenderable } from "@opentui/core"
+import { useKeyboard } from "@opentui/react"
 import { streamText } from "ai"
 import { randomUUID } from "node:crypto"
 import { mkdir, appendFile } from "node:fs/promises"
@@ -7,13 +8,16 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import { defaultModel, MAX_SHELL_OUTPUT, workspaceRoot } from "./config"
 import { formatToolEvent, toCoreMessages } from "./lib/messages"
-import { createModelSelector } from "./lib/model"
+import { createModelSelector, type ReasoningEffort } from "./lib/model"
+import { useModelPicker } from "./lib/modelPicker"
 import { truncate } from "./lib/text"
 import { useInteractiveController } from "./lib/interactive/controller"
 import { loadSystemPrompt } from "./lib/prompt"
 import { executeSlashCommand, type SlashCommandExecution } from "./lib/slashCommands"
+import type { ModelListItem } from "./lib/openrouterModels"
 import { theme, rolePresentation } from "./ui/theme"
 import { Markdown } from "./ui/Markdown"
+import { ModelPickerOverlay } from "./ui/model-picker/ModelPickerOverlay"
 import type { UIMessage } from "./types/chat"
 import type { ToolEventPayload } from "./types/tools"
 import { agentTools } from "./tools"
@@ -91,6 +95,75 @@ export function App() {
   const scrollboxRef = useRef<ScrollBoxRenderable | null>(null)
   const thinkingEnabledRef = useRef(false)
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null)
+  const sanitizedApiKey = apiKey.trim()
+
+  const handleModelSelection = useCallback(
+    (model: ModelListItem, effort: ReasoningEffort | null) => {
+      setModelId(model.id)
+      setReasoningEffort(effort)
+      setError(null)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: randomUUID(),
+          role: "system",
+          content: `Model set to ${model.id}${model.name && model.name !== model.id ? ` (${model.name})` : ""}${
+            effort ? ` with ${effort} reasoning effort` : ""
+          }.`,
+          timestamp: new Date(),
+        },
+      ])
+    },
+    [setMessages],
+  )
+
+  const modelPicker = useModelPicker({
+    apiKey: sanitizedApiKey.length > 0 ? sanitizedApiKey : null,
+    currentModelId: modelId,
+    currentReasoning: reasoningEffort,
+    onSelect: handleModelSelection,
+  })
+
+  const {
+    state: modelPickerState,
+    open: openModelPicker,
+    moveSelection: moveModelSelection,
+    close: closeModelPicker,
+    handleFilterChange: handleModelFilterChange,
+    handleFilterSubmit,
+    handleReasoningInput,
+    handleReasoningSubmit,
+    selectByIndex: selectModelByIndex,
+    setSelection: setModelSelection,
+  } = modelPicker
+
+  useKeyboard(
+    useCallback(
+      (key: ParsedKey) => {
+        if (!modelPickerState.isOpen) {
+          return
+        }
+
+        if (key.name === "escape") {
+          closeModelPicker()
+          return
+        }
+
+        if (modelPickerState.mode === "list") {
+          if (key.name === "up") {
+            moveModelSelection(-1)
+            return
+          }
+          if (key.name === "down") {
+            moveModelSelection(1)
+            return
+          }
+        }
+      },
+      [closeModelPicker, modelPickerState.isOpen, modelPickerState.mode, moveModelSelection],
+    ),
+  )
 
   useEffect(
     () => () => {
@@ -137,13 +210,17 @@ ${truncate(stderr, MAX_SHELL_OUTPUT)}` : "stderr: <empty>",
 
   const runAgent = useCallback(
     async (history: UIMessage[], options?: { signal?: AbortSignal }) => {
-      if (!apiKey) {
+      const sanitizedKey = apiKey.trim()
+      if (!sanitizedKey) {
         throw new Error("OpenRouter API key is not set. Use the :key command to provide one.")
       }
 
-      const selectModel = createModelSelector(apiKey)
+      const selectModel = createModelSelector(sanitizedKey)
+      const modelSettings = reasoningEffort
+        ? { reasoning: { enabled: true, effort: reasoningEffort } }
+        : undefined
       const result = await streamText({
-        model: selectModel(modelId),
+        model: selectModel(modelId, modelSettings),
         messages: toCoreMessages(history),
         tools: agentTools,
         stopWhen: [], // allow multi-step runs so the model can respond after tool execution
@@ -234,8 +311,6 @@ ${text}`
             if (!isMountedRef.current) {
               return
             }
-            console.log("Received part:", part)
-
             if (part.type === "text-end") {
               continue
             }
@@ -382,7 +457,7 @@ ${text}`
         throw streamError
       }
     },
-    [apiKey, modelId],
+    [apiKey, modelId, reasoningEffort],
   )
 
   const handleCommand = useCallback((command: string) => {
@@ -395,6 +470,7 @@ ${text}`
         return
       }
       setModelId(argument)
+      setReasoningEffort(null)
       setError(null)
       setMessages((prev) => [
         ...prev,
@@ -450,12 +526,13 @@ ${text}`
         return
       }
 
+      const sanitizedKey = apiKey.trim()
       if (status === "running") {
         setError("Assistant is still responding. Please wait.")
         return
       }
 
-      if (!apiKey) {
+      if (!sanitizedKey) {
         setError("Set an OpenRouter API key before chatting (:key <token>). ")
         return
       }
@@ -555,6 +632,15 @@ ${text}`
         const commandName = firstSpace === -1 ? commandInput : commandInput.slice(0, firstSpace)
         const argumentText = firstSpace === -1 ? "" : commandInput.slice(firstSpace + 1).trim()
 
+        if (commandName === "model") {
+          setError(null)
+          openModelPicker(argumentText)
+          if (argumentText && modelPickerState.fetchState === "success") {
+            handleFilterSubmit(argumentText)
+          }
+          return
+        }
+
         if (commandName === "clear") {
           if (argumentText) {
             setError("Usage: /clear")
@@ -645,7 +731,18 @@ ${text}`
         }
       }
     },
-    [apiKey, handleCommand, messages, runAgent, runShellCommand, formatShellResult, status],
+    [
+      apiKey,
+      formatShellResult,
+      handleCommand,
+      handleFilterSubmit,
+      messages,
+      modelPickerState.fetchState,
+      openModelPicker,
+      runAgent,
+      runShellCommand,
+      status,
+    ],
   )
 
   const handleBackgroundRequest = useCallback(
@@ -793,11 +890,13 @@ ${text}`
     thinkingEnabledRef.current = thinkingEnabled
   }, [thinkingEnabled])
 
+  const modelDisplay = reasoningEffort ? `${modelId} (effort: ${reasoningEffort})` : modelId
+
 
 
   return (
     <box flexDirection="column" flexGrow={1} padding={1} gap={1} style={{ backgroundColor: theme.background }}>
-      {messages.length === 1 && (
+      {messages.length >= 1 && (
         <box
           flexDirection="column"
           gap={1}
@@ -813,13 +912,13 @@ ${text}`
         </box>
         <box>
           <text fg={theme.headerAccent} attributes={TextAttributes.BOLD}>
-              Model · {modelId}
+              Model · {modelDisplay}
           </text>
         </box>
         {/* <box justifyContent="space-between" alignItems="flex-start">
           <box flexDirection="column" gap={1}>
             <text fg={theme.headerAccent} attributes={TextAttributes.BOLD}>
-              Model · {modelId}
+              Model · {modelDisplay}
             </text>
           </box>
           <text fg={apiKey ? theme.statusFg : theme.headerAccent}>API key · {apiKey ? "configured" : "missing"}</text>
@@ -925,30 +1024,43 @@ ${text}`
         </box>
       ) : null}
 
-      <box
-        flexDirection="column"
-        gap={0}
-        style={{
-          border: ["left"],
-          borderStyle: "heavy",
-          borderColor: theme.inputBorder,
-          paddingTop: 1,
-          paddingBottom: 2,
-          paddingLeft: 2,
-          backgroundColor: theme.header,
-        }}
-      >
-        <input
-          value={inputValue}
-          onInput={interactive.handleInput}
-          onSubmit={interactive.handleSubmit}
-          focused
-          style={{
-            // backgroundColor: theme.inputBg,
-            // focusedBackgroundColor: theme.inputFocusedBg,
-          }}
+      {modelPickerState.isOpen ? (
+        <ModelPickerOverlay
+          state={modelPickerState}
+          currentModelId={modelId}
+          onFilterChange={handleModelFilterChange}
+          onFilterSubmit={handleFilterSubmit}
+          onReasoningChange={handleReasoningInput}
+          onReasoningSubmit={handleReasoningSubmit}
+          onOptionChange={(index) => setModelSelection(index)}
+          onOptionSelect={(index) => selectModelByIndex(index)}
         />
-      </box>
+      ) : (
+        <box
+          flexDirection="column"
+          gap={0}
+          style={{
+            border: ["left"],
+            borderStyle: "heavy",
+            borderColor: theme.inputBorder,
+            paddingTop: 1,
+            paddingBottom: 2,
+            paddingLeft: 2,
+            backgroundColor: theme.header,
+          }}
+        >
+          <input
+            value={inputValue}
+            onInput={interactive.handleInput}
+            onSubmit={interactive.handleSubmit}
+            focused
+            style={{
+              // backgroundColor: theme.inputBg,
+              // focusedBackgroundColor: theme.inputFocusedBg,
+            }}
+          />
+        </box>
+      )}
     </box>
   )
 }
