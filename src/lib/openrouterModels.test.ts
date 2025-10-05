@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { isGpt5Model, normalizeOpenRouterModel } from "./openrouterModels";
+import { fetchOpenRouterModels, isGpt5Model, normalizeOpenRouterModel } from "./openrouterModels";
 
 test("normalizeOpenRouterModel extracts key fields", () => {
   const result = normalizeOpenRouterModel({
@@ -51,4 +51,15 @@ test("isGpt5Model checks id and name", () => {
     name: "Anthropic Claude 4",
   })
   expect(isGpt5Model(other)).toBe(false)
+})
+
+test("fetchOpenRouterModels returns live models from OpenRouter", async () => {
+  const models = await fetchOpenRouterModels(Bun.env.OPENROUTER_API_KEY ?? undefined)
+
+  expect(Array.isArray(models)).toBe(true)
+  expect(models.length).toBeGreaterThan(0)
+  for (const model of models) {
+    expect(typeof model.id).toBe("string")
+    expect(model.id.length).toBeGreaterThan(0)
+  }
 })

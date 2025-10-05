@@ -26,6 +26,7 @@
     "hi",
     "/model",
     "hi",
-    "save all updates to git using conventional commit messages and push"
+    "save all updates to git using conventional commit messages and push",
+    "save updates to git using conventional commit messages and push"
   ]
 }
