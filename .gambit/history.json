@@ -17,6 +17,15 @@
     "hi",
     "/model",
     "hi",
-    "commit all the changes using conventional commit messages and push to repo"
+    "commit all the changes using conventional commit messages and push to repo",
+    "/help",
+    "/model",
+    "/help",
+    "hi",
+    "/help",
+    "hi",
+    "/model",
+    "hi",
+    "save all updates to git using conventional commit messages and push"
   ]
 }

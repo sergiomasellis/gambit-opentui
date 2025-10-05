@@ -42,6 +42,24 @@ const timestampLabels: Record<UIMessage["role"], string> = {
   tool: "Tool event",
 }
 
+const formatDuration = (milliseconds: number) => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const parts: string[] = []
+
+  if (hours > 0) {
+    parts.push(`${hours}h`)
+  }
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`)
+  }
+  parts.push(`${seconds}s`)
+
+  return parts.join(" ")
+}
+
 const initialSystemMessage: UIMessage = {
   id: randomUUID(),
   role: "system",
@@ -90,10 +108,12 @@ export function App() {
   const [modelId, setModelId] = useState(defaultModel)
   const [apiKey, setApiKey] = useState<string>(Bun.env.OPENROUTER_API_KEY ?? "")
   const [status, setStatus] = useState<"idle" | "running">("idle")
+  const [statusElapsed, setStatusElapsed] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const isMountedRef = useRef(true)
   const scrollboxRef = useRef<ScrollBoxRenderable | null>(null)
   const thinkingEnabledRef = useRef(false)
+  const statusStartedAtRef = useRef<Date | null>(null)
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null)
   const sanitizedApiKey = apiKey.trim()
@@ -182,6 +202,30 @@ export function App() {
     const maxScrollTop = Math.max(0, scrollbox.scrollHeight - viewportHeight)
     scrollbox.scrollTo(maxScrollTop)
   }, [messages])
+
+  useEffect(() => {
+    if (status !== "running") {
+      statusStartedAtRef.current = null
+      setStatusElapsed(null)
+      return
+    }
+
+    statusStartedAtRef.current = new Date()
+    setStatusElapsed(formatDuration(0))
+
+    const intervalId = setInterval(() => {
+      const startedAt = statusStartedAtRef.current
+      if (!startedAt) {
+        return
+      }
+
+      setStatusElapsed(formatDuration(Date.now() - startedAt.getTime()))
+    }, 1000)
+
+    return () => {
+      clearInterval(intervalId)
+    }
+  }, [status])
 
   const runShellCommand = useCallback(async (command: string) => {
     const process = Bun.spawn(["bash", "-lc", command], {
@@ -891,6 +935,7 @@ ${text}`
   }, [thinkingEnabled])
 
   const modelDisplay = reasoningEffort ? `${modelId} (effort: ${reasoningEffort})` : modelId
+  const statusDisplay = status === "running" && statusElapsed ? `running - ${statusElapsed}` : status
 
 
 
@@ -902,19 +947,22 @@ ${text}`
           gap={1}
           style={{ border: ["left"], padding: 1, backgroundColor: theme.header, borderColor: theme.headerBorder }}
         >
-          <box justifyContent="space-between" alignItems="flex-start">
+        <box justifyContent="space-between" flexDirection="row">
           <ascii-font font="tiny" text="Gambit" />
-        </box>
-        <box flexDirection="column">
-          <text fg={theme.statusFg} attributes={status === "running" ? TextAttributes.BLINK : TextAttributes.DIM}>
-            Status · {status === "running" ? "thinking…" : "idle"}
-          </text>
-        </box>
-        <box>
           <text fg={theme.headerAccent} attributes={TextAttributes.BOLD}>
               Model · {modelDisplay}
           </text>
         </box>
+        {/* <box flexDirection="column">
+          <text fg={theme.statusFg} attributes={status === "running" ? TextAttributes.BLINK : TextAttributes.DIM}>
+            Status · {status === "running" ? "thinking…" : "idle"}
+          </text>
+        </box> */}
+        {/* <box>
+          <text fg={theme.headerAccent} attributes={TextAttributes.BOLD}>
+              Model · {modelDisplay}
+          </text>
+        </box> */}
         {/* <box justifyContent="space-between" alignItems="flex-start">
           <box flexDirection="column" gap={1}>
             <text fg={theme.headerAccent} attributes={TextAttributes.BOLD}>
@@ -1004,7 +1052,7 @@ ${text}`
       >
         <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Thinking - ${thinkingEnabled ? 'on' : 'off'}`} />
         <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Permissions - ${permissionMode}`} />
-        <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Status - ${status}`} />
+        <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Status - ${statusDisplay}`} />
       </box>
 
       {backgroundTasks.length > 0 ? (
