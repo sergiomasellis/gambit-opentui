@@ -3,25 +3,31 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { setWorkspaceRootForTesting, workspaceRoot as currentWorkspaceRoot } from "../config";
+
 let workspaceDir: string;
 let patchTool: (params: { path?: string; patch: string }) => Promise<string>;
-let originalWorkspaceRoot: string | undefined;
+let originalWorkspaceRootEnv: string | undefined;
+let originalWorkspaceRootValue: string;
 
 beforeAll(async () => {
   workspaceDir = await mkdtemp(path.join(tmpdir(), "gambit-patch-tool-"));
-  originalWorkspaceRoot = process.env.WORKSPACE_ROOT;
+  originalWorkspaceRootEnv = process.env.WORKSPACE_ROOT;
+  originalWorkspaceRootValue = currentWorkspaceRoot;
   process.env.WORKSPACE_ROOT = workspaceDir;
+  setWorkspaceRootForTesting(workspaceDir);
   const toolsModule = await import("./index");
   patchTool = async (params) => toolsModule.agentTools.patchFile.execute(params as any);
 });
 
 afterAll(async () => {
   await rm(workspaceDir, { recursive: true, force: true });
-  if (originalWorkspaceRoot === undefined) {
+  if (originalWorkspaceRootEnv === undefined) {
     delete process.env.WORKSPACE_ROOT;
   } else {
-    process.env.WORKSPACE_ROOT = originalWorkspaceRoot;
+    process.env.WORKSPACE_ROOT = originalWorkspaceRootEnv;
   }
+  setWorkspaceRootForTesting(originalWorkspaceRootValue);
 });
 
 test("patch tool deletes files when diff targets /dev/null", async () => {

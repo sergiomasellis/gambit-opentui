@@ -7,6 +7,12 @@ import { MAX_FILE_CHARS, MAX_SHELL_OUTPUT, workspaceRoot } from "../config";
 import { truncate } from "../lib/text";
 import { applyUnifiedDiff, sanitizePatchTargets, splitUnifiedDiffByFile } from "../lib/diff";
 import { relativeWorkspacePath, resolveWorkspacePath } from "../lib/workspace";
+import {
+  buildSlashCommandToolDescription,
+  executeSlashCommand,
+  loadSlashCommands,
+  type SlashCommandExecution,
+} from "../lib/slashCommands";
 
 const readFileSchema = z.object({
   path: z.string().describe("File path relative to the workspace root."),
@@ -26,11 +32,36 @@ const executeShellSchema = z.object({
   command: z.string().describe("Command to execute using bash -lc."),
 });
 
+const slashCommandSchema = z.object({
+  name: z
+    .string()
+    .describe("Slash command to execute (with optional namespace). Example: 'context' or 'frontend/context'."),
+  arguments: z
+    .string()
+    .describe("Arguments forwarded to the command; they will populate $ARGUMENTS and positional placeholders.")
+    .optional(),
+});
+
+const cachedSlashCommands = await loadSlashCommands();
+const slashCommandDescription = buildSlashCommandToolDescription(cachedSlashCommands);
+
+function ensureNonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`Parameter \"${label}\" must be a string.`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Parameter \"${label}\" must not be empty.`);
+  }
+  return trimmed;
+}
+
 const readFileTool = tool<typeof readFileSchema, string>({
   description: "Read a UTF-8 file from the workspace.",
   parameters: readFileSchema,
-  execute: async ({ path: targetPath }) => {
-    const resolvedPath = resolveWorkspacePath(targetPath);
+  execute: async ({ path }) => {
+    const normalizedPath = ensureNonEmptyString(path, "path");
+    const resolvedPath = resolveWorkspacePath(normalizedPath);
     const file = Bun.file(resolvedPath);
     if (!(await file.exists())) {
       return `File not found: ${relativeWorkspacePath(resolvedPath)}`;
@@ -43,8 +74,12 @@ const readFileTool = tool<typeof readFileSchema, string>({
 const writeFileTool = tool<typeof writeFileSchema, string>({
   description: "Overwrite a file in the workspace with new content.",
   parameters: writeFileSchema,
-  execute: async ({ path: targetPath, content }) => {
-    const resolvedPath = resolveWorkspacePath(targetPath);
+  execute: async ({ path, content }) => {
+    const normalizedPath = ensureNonEmptyString(path, "path");
+    if (typeof content !== "string") {
+      throw new Error('Parameter "content" must be a string.');
+    }
+    const resolvedPath = resolveWorkspacePath(normalizedPath);
     await mkdir(path.dirname(resolvedPath), { recursive: true });
     const bytesWritten = await Bun.write(resolvedPath, content);
     return `Wrote ${bytesWritten} bytes to ${relativeWorkspacePath(resolvedPath)}.`;
@@ -55,11 +90,9 @@ const patchFileTool = tool<typeof patchFileSchema, string>({
   description: "Apply a unified diff patch to a file.",
   parameters: patchFileSchema,
   execute: async ({ path: targetPath, patch }) => {
-    if (!patch.trim()) {
-      throw new Error("Patch text cannot be empty.");
-    }
+    const normalizedPatch = ensureNonEmptyString(patch, "patch");
 
-    if (patch.includes("*** Begin Patch")) {
+    if (normalizedPatch.includes("*** Begin Patch")) {
       throw new Error("apply_patch formatted patches are not supported.");
     }
 
@@ -68,7 +101,7 @@ const patchFileTool = tool<typeof patchFileSchema, string>({
       ? relativeWorkspacePath(resolveWorkspacePath(trimmedTarget))
       : null;
 
-    const perFilePatches = splitUnifiedDiffByFile(patch);
+    const perFilePatches = splitUnifiedDiffByFile(normalizedPatch);
 
     if (perFilePatches.length === 0) {
       if (!explicitTarget) {
@@ -77,13 +110,13 @@ const patchFileTool = tool<typeof patchFileSchema, string>({
 
       const resolvedPath = resolveWorkspacePath(explicitTarget);
       const relativePath = relativeWorkspacePath(resolvedPath);
-      sanitizePatchTargets(patch, relativePath);
+      sanitizePatchTargets(normalizedPatch, relativePath);
 
       const file = Bun.file(resolvedPath);
       const exists = await file.exists();
       const baseText = exists ? await file.text() : "";
-      const updated = applyUnifiedDiff(baseText, patch);
-      const isDeletion = /\+\+\+\s+\/dev\/null/.test(patch);
+      const updated = applyUnifiedDiff(baseText, normalizedPatch);
+      const isDeletion = /\+\+\+\s+\/dev\/null/.test(normalizedPatch);
 
       if (isDeletion) {
         if (!exists) {
@@ -179,11 +212,16 @@ const executeShellTool = tool<typeof executeShellSchema, string>({
   description: "Execute a shell command from the workspace root.",
   parameters: executeShellSchema,
   execute: async ({ command }) => {
-    if (!command.trim()) {
+    if (typeof command !== "string") {
+      throw new Error('Parameter "command" must be a string.');
+    }
+
+    const trimmedCommand = command.trim();
+    if (!trimmedCommand) {
       return "No command provided.";
     }
 
-    const process = Bun.spawn(["bash", "-lc", command], {
+    const process = Bun.spawn(["bash", "-lc", trimmedCommand], {
       cwd: workspaceRoot,
       stdout: "pipe",
       stderr: "pipe",
@@ -205,11 +243,20 @@ const executeShellTool = tool<typeof executeShellSchema, string>({
   },
 });
 
+const slashCommandTool = tool<typeof slashCommandSchema, SlashCommandExecution>({
+  description: slashCommandDescription,
+  parameters: slashCommandSchema,
+  execute: async ({ name, arguments: args }) => {
+    return executeSlashCommand(name, args);
+  },
+});
+
 export const agentTools = {
   readFile: readFileTool,
   writeFile: writeFileTool,
   patchFile: patchFileTool,
   executeShell: executeShellTool,
+  slashCommand: slashCommandTool,
 };
 
 export type AgentTools = typeof agentTools;

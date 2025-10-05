@@ -7,6 +7,7 @@ import { defaultModel } from "./config"
 import { formatToolEvent, toCoreMessages } from "./lib/messages"
 import { createModelSelector } from "./lib/model"
 import { loadSystemPrompt } from "./lib/prompt"
+import { executeSlashCommand, type SlashCommandExecution } from "./lib/slashCommands"
 import { theme, rolePresentation } from "./ui/theme"
 import { Markdown } from "./ui/Markdown"
 import type { UIMessage } from "./types/chat"
@@ -39,6 +40,28 @@ const initialSystemMessage: UIMessage = {
   content: systemPrompt,
   hidden: true,
   timestamp: new Date(),
+}
+
+function formatSlashCommandMessage(execution: SlashCommandExecution): string {
+  const scopeLabel = execution.namespace ? `${execution.scope}:${execution.namespace}` : execution.scope
+  const header: string[] = [`Command · ${execution.command}`, `Scope · ${scopeLabel}`]
+
+  if (execution.arguments) {
+    header.push(`Arguments · ${execution.arguments}`)
+  }
+  if (execution.allowedTools.length > 0) {
+    header.push(`Allowed tools · ${execution.allowedTools.join(", ")}`)
+  }
+  if (execution.model) {
+    header.push(`Preferred model · ${execution.model}`)
+  }
+
+  const headerBlock = header.join("\n")
+  if (!execution.content) {
+    return headerBlock
+  }
+
+  return `${headerBlock}\n\n${execution.content}`
 }
 
 export function App() {
@@ -379,6 +402,58 @@ export function App() {
 
       if (!apiKey) {
         setError("Set an OpenRouter API key before chatting (:key <token>). ")
+        return
+      }
+
+      if (trimmed.startsWith("/")) {
+        const commandInput = trimmed.slice(1).trim()
+        if (!commandInput) {
+          setError("Usage: /<command-name> [arguments]")
+          return
+        }
+
+        const firstSpace = commandInput.indexOf(" ")
+        const commandName = firstSpace === -1 ? commandInput : commandInput.slice(0, firstSpace)
+        const argumentText = firstSpace === -1 ? "" : commandInput.slice(firstSpace + 1).trim()
+
+        try {
+          setError(null)
+          const execution = await executeSlashCommand(commandName, argumentText)
+          const userMessage: UIMessage = {
+            id: randomUUID(),
+            role: "user",
+            content: formatSlashCommandMessage(execution),
+            timestamp: new Date(),
+          }
+
+          const history = [...messages, userMessage]
+          setMessages(history)
+          setStatus("running")
+
+          try {
+            await runAgent(history)
+          } catch (agentError) {
+            if (isMountedRef.current) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: randomUUID(),
+                  role: "assistant",
+                  content: `Encountered an error: ${(agentError as Error).message}`,
+                  timestamp: new Date(),
+                },
+              ])
+              setError((agentError as Error).message)
+            }
+          } finally {
+            if (isMountedRef.current) {
+              setStatus("idle")
+            }
+          }
+        } catch (commandError) {
+          setError((commandError as Error).message)
+        }
+
         return
       }
 
