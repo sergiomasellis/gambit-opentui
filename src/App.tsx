@@ -15,6 +15,24 @@ import { agentTools } from "./tools"
 
 const systemPrompt = await loadSystemPrompt()
 
+const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+})
+
+const formatTimestamp = (value: Date) => timestampFormatter.format(value)
+
+const timestampLabels: Record<UIMessage["role"], string> = {
+  system: "System",
+  user: "Sent",
+  assistant: "Responded",
+  tool: "Tool event",
+}
+
 const initialSystemMessage: UIMessage = {
   id: randomUUID(),
   role: "system",
@@ -103,6 +121,7 @@ export function App() {
               const existingIndex = prev.findIndex(
                 (message) => message.id === messageId || message.metadata?.toolCallId === toolCallId,
               )
+              const previousMessage = existingIndex === -1 ? undefined : prev[existingIndex]
               const nextMessage: UIMessage = {
                 id: messageId,
                 role: "tool",
@@ -111,6 +130,7 @@ export function App() {
                   toolCallId,
                   toolName,
                 },
+                timestamp: previousMessage?.timestamp ?? new Date(),
               }
 
               if (existingIndex === -1) {
@@ -181,7 +201,10 @@ export function App() {
                     : assistantContent
                   if (existingIndex === -1) {
                     assistantMessageAdded = true
-                    return [...prev, { id: assistantId, role: "assistant", content: fullContent }]
+                    return [
+                      ...prev,
+                      { id: assistantId, role: "assistant", content: fullContent, timestamp: new Date() },
+                    ]
                   }
                   return prev.map((message, index) =>
                     index === existingIndex ? { ...message, content: fullContent } : message,
@@ -269,7 +292,10 @@ export function App() {
           }
         } else if (finalText.trim()) {
           assistantMessageAdded = true
-          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: finalText }])
+          setMessages((prev) => [
+            ...prev,
+            { id: assistantId, role: "assistant", content: finalText, timestamp: new Date() },
+          ])
         }
       } catch (streamError) {
         if (isMountedRef.current && assistantMessageAdded) {
@@ -298,6 +324,7 @@ export function App() {
           id: randomUUID(),
           role: "system",
           content: `Model set to ${argument}`,
+          timestamp: new Date(),
         },
       ])
       return
@@ -316,6 +343,7 @@ export function App() {
           id: randomUUID(),
           role: "system",
           content: `Updated OpenRouter API key (${argument.length} characters provided).`,
+          timestamp: new Date(),
         },
       ])
       return
@@ -359,6 +387,7 @@ export function App() {
         id: randomUUID(),
         role: "user",
         content: trimmed,
+        timestamp: new Date(),
       }
 
       const history = [...messages, userMessage]
@@ -375,6 +404,7 @@ export function App() {
               id: randomUUID(),
               role: "assistant",
               content: `Encountered an error: ${(agentError as Error).message}`,
+              timestamp: new Date(),
             },
           ])
           setError((agentError as Error).message)
@@ -390,12 +420,13 @@ export function App() {
 
   return (
     <box flexDirection="column" flexGrow={1} padding={1} gap={1} style={{ backgroundColor: theme.background }}>
-      <box
-        flexDirection="column"
-        gap={1}
-        style={{ border: ["left"], padding: 1, backgroundColor: theme.header }}
-      >
-        <box justifyContent="space-between" alignItems="flex-start">
+      {messages.length === 1 && (
+        <box
+          flexDirection="column"
+          gap={1}
+          style={{ border: ["left"], padding: 1, backgroundColor: theme.header, borderColor: theme.headerBorder }}
+        >
+          <box justifyContent="space-between" alignItems="flex-start">
           <ascii-font font="tiny" text="Gambit" />
         </box>
         <box flexDirection="column">
@@ -416,7 +447,7 @@ export function App() {
           </box>
           <text fg={apiKey ? theme.statusFg : theme.headerAccent}>API key · {apiKey ? "configured" : "missing"}</text>
         </box> */}
-      </box>
+      </box>)}
 
       {error ? (
         <box style={{ border: ["left"], padding: 1, backgroundColor: theme.systemBg }}>
@@ -431,11 +462,12 @@ export function App() {
         stickyStart="bottom"
         style={{
           rootOptions: {
-            border: ["left"],
+            // border: ["left"],
             flexGrow: 1,
-            backgroundColor: theme.panel,
+            backgroundColor: theme.background,
+            borderColor: theme.bodyBorder,
           },
-          contentOptions: { flexDirection: "column", gap: 1, padding: 1, backgroundColor: theme.panel },
+          contentOptions: { flexDirection: "column", gap: 1, padding: 1, backgroundColor: theme.background },
         }}
       >
         {messages
@@ -454,6 +486,7 @@ export function App() {
                   borderStyle: "heavy",
                   padding: 1,
                   backgroundColor: presentation.backgroundColor,
+                  borderColor: theme.bodyBorder,
                 }}
               >
                 <text
@@ -462,6 +495,9 @@ export function App() {
                   content={`${presentation.label}${labelSuffix}`}
                 />
                 <Markdown content={message.content} textColor={presentation.textColor} />
+                <text fg={theme.statusFg} attributes={TextAttributes.DIM}>
+                  {timestampLabels[message.role]} · {formatTimestamp(message.timestamp)}
+                </text>
               </box>
             )
           })}
@@ -473,7 +509,7 @@ export function App() {
         style={{
           border: ["left"],
           borderStyle: "heavy",
-          borderColor: "#3f3f3f",
+          borderColor: theme.inputBorder,
           paddingTop: 1,
           paddingBottom: 2,
           paddingLeft: 2,
@@ -486,8 +522,8 @@ export function App() {
           onSubmit={handleSubmit}
           focused
           style={{
-            backgroundColor: theme.inputBg,
-            focusedBackgroundColor: theme.inputFocusedBg,
+            // backgroundColor: theme.inputBg,
+            // focusedBackgroundColor: theme.inputFocusedBg,
           }}
         />
       </box>
