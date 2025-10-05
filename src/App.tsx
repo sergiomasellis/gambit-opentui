@@ -1,11 +1,15 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { streamText } from "ai"
 import { randomUUID } from "node:crypto"
+import { mkdir, appendFile } from "node:fs/promises"
+import path from "node:path"
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { defaultModel } from "./config"
+import { defaultModel, MAX_SHELL_OUTPUT, workspaceRoot } from "./config"
 import { formatToolEvent, toCoreMessages } from "./lib/messages"
 import { createModelSelector } from "./lib/model"
+import { truncate } from "./lib/text"
+import { useInteractiveController } from "./lib/interactive/controller"
 import { loadSystemPrompt } from "./lib/prompt"
 import { executeSlashCommand, type SlashCommandExecution } from "./lib/slashCommands"
 import { theme, rolePresentation } from "./ui/theme"
@@ -42,6 +46,18 @@ const initialSystemMessage: UIMessage = {
   timestamp: new Date(),
 }
 
+
+interface BackgroundTask {
+  id: string
+  command: string
+  status: "running" | "succeeded" | "failed"
+  exitCode: number | null
+  stdout: string
+  stderr: string
+  startedAt: Date
+  finishedAt?: Date
+}
+
 function formatSlashCommandMessage(execution: SlashCommandExecution): string {
   const scopeLabel = execution.namespace ? `${execution.scope}:${execution.namespace}` : execution.scope
   const header: string[] = [`Command · ${execution.command}`, `Scope · ${scopeLabel}`]
@@ -73,6 +89,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null)
   const isMountedRef = useRef(true)
   const scrollboxRef = useRef<ScrollBoxRenderable | null>(null)
+  const thinkingEnabledRef = useRef(false)
+  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
 
   useEffect(
     () => () => {
@@ -92,8 +110,33 @@ export function App() {
     scrollbox.scrollTo(maxScrollTop)
   }, [messages])
 
+  const runShellCommand = useCallback(async (command: string) => {
+    const process = Bun.spawn(["bash", "-lc", command], {
+      cwd: workspaceRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+
+    const stdoutPromise = process.stdout ? new Response(process.stdout).text() : Promise.resolve("")
+    const stderrPromise = process.stderr ? new Response(process.stderr).text() : Promise.resolve("")
+    const [stdout, stderr, exitCode] = await Promise.all([stdoutPromise, stderrPromise, process.exited])
+
+    return { stdout, stderr, exitCode }
+  }, [])
+
+  const formatShellResult = useCallback((exitCode: number, stdout: string, stderr: string) => {
+    const outputParts = [
+      `exit_code: ${exitCode}`,
+      stdout ? `stdout:
+${truncate(stdout, MAX_SHELL_OUTPUT)}` : "stdout: <empty>",
+      stderr ? `stderr:
+${truncate(stderr, MAX_SHELL_OUTPUT)}` : "stderr: <empty>",
+    ]
+    return outputParts.join("\n")
+  }, [])
+
   const runAgent = useCallback(
-    async (history: UIMessage[]) => {
+    async (history: UIMessage[], options?: { signal?: AbortSignal }) => {
       if (!apiKey) {
         throw new Error("OpenRouter API key is not set. Use the :key command to provide one.")
       }
@@ -104,6 +147,7 @@ export function App() {
         messages: toCoreMessages(history),
         tools: agentTools,
         stopWhen: [], // allow multi-step runs so the model can respond after tool execution
+        abortSignal: options?.signal,
       })
 
       if (!isMountedRef.current) {
@@ -114,6 +158,19 @@ export function App() {
       let reasoningContent = ""
       const assistantId = randomUUID()
       let assistantMessageAdded = false
+      const composeAssistantContent = (text: string) => {
+        if (!thinkingEnabledRef.current) {
+          return text
+        }
+        const trimmed = reasoningContent.trim()
+        if (!trimmed) {
+          return text
+        }
+        return `Reasoning:
+${reasoningContent}
+
+${text}`
+      }
 
       try {
         const streamPromise = (async () => {
@@ -219,9 +276,7 @@ export function App() {
                 assistantContent += chunk
                 setMessages((prev) => {
                   const existingIndex = prev.findIndex((message) => message.id === assistantId)
-                  const fullContent = reasoningContent
-                    ? `Reasoning:\n${reasoningContent}\n\n${assistantContent}`
-                    : assistantContent
+                  const fullContent = composeAssistantContent(assistantContent)
                   if (existingIndex === -1) {
                     assistantMessageAdded = true
                     return [
@@ -292,12 +347,12 @@ export function App() {
           return
         }
 
-        let finalText = reasoningContent ? `Reasoning:\n${reasoningContent}\n\n${assistantContent}` : assistantContent
+        let finalText = composeAssistantContent(assistantContent)
         if (!assistantMessageAdded || !assistantContent.trim()) {
           try {
             const resolvedText = await result.text
             if (typeof resolvedText === "string") {
-              finalText = reasoningContent ? `Reasoning:\n${reasoningContent}\n\n${resolvedText}` : resolvedText
+              finalText = composeAssistantContent(resolvedText)
             }
           } catch (finalTextError) {
             console.warn("Failed to load final assistant text", finalTextError)
@@ -307,7 +362,7 @@ export function App() {
         if (assistantMessageAdded) {
           if (!finalText.trim()) {
             setMessages((prev) => prev.filter((message) => message.id !== assistantId))
-          } else if (finalText !== assistantContent) {
+          } else if (finalText !== composeAssistantContent(assistantContent)) {
             const nextContent = finalText
             setMessages((prev) =>
               prev.map((message) => (message.id === assistantId ? { ...message, content: nextContent } : message)),
@@ -381,8 +436,8 @@ export function App() {
     setError(`Unknown command: ${keyword}`)
   }, [])
 
-  const handleSubmit = useCallback(
-    async (value: string) => {
+  const performSubmit = useCallback(
+    async (value: string, { signal }: { signal: AbortSignal }) => {
       const trimmed = value.trim()
       if (!trimmed) {
         return
@@ -405,6 +460,90 @@ export function App() {
         return
       }
 
+      if (trimmed.startsWith("!")) {
+        const commandText = trimmed.slice(1).trim()
+        if (!commandText) {
+          setError("Usage: !<command>")
+          return
+        }
+
+        setError(null)
+        const userMessage: UIMessage = {
+          id: randomUUID(),
+          role: "user",
+          content: trimmed,
+          timestamp: new Date(),
+        }
+
+        const historyMessages = [...messages, userMessage]
+        setMessages(historyMessages)
+        setStatus("running")
+
+        try {
+          const result = await runShellCommand(commandText)
+          const assistantMessage: UIMessage = {
+            id: randomUUID(),
+            role: "assistant",
+            content: formatShellResult(result.exitCode ?? 0, result.stdout, result.stderr),
+            timestamp: new Date(),
+          }
+          setMessages((prev) => [...prev, assistantMessage])
+        } catch (shellError) {
+          if (isMountedRef.current) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: randomUUID(),
+                role: "assistant",
+                content: `Shell command failed: ${(shellError as Error).message}`,
+                timestamp: new Date(),
+              },
+            ])
+          }
+          setError((shellError as Error).message)
+        } finally {
+          if (isMountedRef.current) {
+            setStatus("idle")
+          }
+        }
+
+        return
+      }
+
+      if (trimmed.startsWith("#")) {
+        const memoryText = trimmed.slice(1).trim()
+        if (!memoryText) {
+          setError("Usage: # <memory entry>")
+          return
+        }
+
+        try {
+          const memoryDir = path.join(workspaceRoot, ".gambit")
+          await mkdir(memoryDir, { recursive: true })
+          const memoryFilePath = path.join(memoryDir, "gambit.md")
+          await appendFile(memoryFilePath, `${memoryText}
+`, "utf8")
+          const userMessage: UIMessage = {
+            id: randomUUID(),
+            role: "user",
+            content: trimmed,
+            timestamp: new Date(),
+          }
+          const confirmationMessage: UIMessage = {
+            id: randomUUID(),
+            role: "system",
+            content: `Saved to memory: ${memoryText}`,
+            timestamp: new Date(),
+          }
+          setMessages((prev) => [...prev, userMessage, confirmationMessage])
+          setError(null)
+        } catch (memoryError) {
+          setError((memoryError as Error).message)
+        }
+
+        return
+      }
+
       if (trimmed.startsWith("/")) {
         const commandInput = trimmed.slice(1).trim()
         if (!commandInput) {
@@ -416,6 +555,18 @@ export function App() {
         const commandName = firstSpace === -1 ? commandInput : commandInput.slice(0, firstSpace)
         const argumentText = firstSpace === -1 ? "" : commandInput.slice(firstSpace + 1).trim()
 
+        if (commandName === "clear") {
+          if (argumentText) {
+            setError("Usage: /clear")
+            return
+          }
+
+          setMessages([initialSystemMessage])
+          setStatus("idle")
+          setError(null)
+          return
+        }
+
         try {
           setError(null)
           const execution = await executeSlashCommand(commandName, argumentText)
@@ -426,14 +577,16 @@ export function App() {
             timestamp: new Date(),
           }
 
-          const history = [...messages, userMessage]
-          setMessages(history)
+          const historyMessages = [...messages, userMessage]
+          setMessages(historyMessages)
           setStatus("running")
 
           try {
-            await runAgent(history)
+            await runAgent(historyMessages, { signal })
           } catch (agentError) {
-            if (isMountedRef.current) {
+            if (signal.aborted) {
+              setError("Generation cancelled.")
+            } else if (isMountedRef.current) {
               setMessages((prev) => [
                 ...prev,
                 {
@@ -465,14 +618,16 @@ export function App() {
         timestamp: new Date(),
       }
 
-      const history = [...messages, userMessage]
-      setMessages(history)
+      const historyMessages = [...messages, userMessage]
+      setMessages(historyMessages)
       setStatus("running")
 
       try {
-        await runAgent(history)
+        await runAgent(historyMessages, { signal })
       } catch (agentError) {
-        if (isMountedRef.current) {
+        if (signal.aborted) {
+          setError("Generation cancelled.")
+        } else if (isMountedRef.current) {
           setMessages((prev) => [
             ...prev,
             {
@@ -490,8 +645,155 @@ export function App() {
         }
       }
     },
-    [apiKey, handleCommand, messages, runAgent, status],
+    [apiKey, handleCommand, messages, runAgent, runShellCommand, formatShellResult, status],
   )
+
+  const handleBackgroundRequest = useCallback(
+    (rawCommand: string) => {
+      const trimmed = rawCommand.trim()
+      if (!trimmed.startsWith("!")) {
+        setError("Background mode requires a !command input.")
+        return false
+      }
+
+      const commandText = trimmed.slice(1).trim()
+      if (!commandText) {
+        setError("Usage: !<command>")
+        return false
+      }
+
+      const taskId = randomUUID()
+      const startedAt = new Date()
+
+      setBackgroundTasks((prev) => [
+        ...prev,
+        {
+          id: taskId,
+          command: commandText,
+          status: "running",
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          startedAt,
+        },
+      ])
+
+      if (isMountedRef.current) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: randomUUID(),
+            role: "system",
+            content: `Started background task ${taskId} (${commandText}).`,
+            timestamp: startedAt,
+          },
+        ])
+      }
+
+      ;(async () => {
+        try {
+          const result = await runShellCommand(commandText)
+          const finishedAt = new Date()
+          setBackgroundTasks((prev) =>
+            prev.map((task) =>
+              task.id === taskId
+                ? {
+                    ...task,
+                    status: result.exitCode === 0 ? "succeeded" : "failed",
+                    exitCode: result.exitCode,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    finishedAt,
+                  }
+                : task,
+            ),
+          )
+
+          if (isMountedRef.current) {
+            const summary = result.exitCode === 0 ? "completed" : `exited with code ${result.exitCode}`
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: randomUUID(),
+                role: "system",
+                content: `Background task ${taskId} ${summary}.`,
+                timestamp: finishedAt,
+              },
+              {
+                id: randomUUID(),
+                role: "assistant",
+                content: formatShellResult(result.exitCode ?? 0, result.stdout, result.stderr),
+                timestamp: finishedAt,
+              },
+            ])
+          }
+        } catch (error) {
+          const finishedAt = new Date()
+          setBackgroundTasks((prev) =>
+            prev.map((task) =>
+              task.id === taskId
+                ? {
+                    ...task,
+                    status: "failed",
+                    stderr: (error as Error).message,
+                    finishedAt,
+                  }
+                : task,
+            ),
+          )
+
+          if (isMountedRef.current) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: randomUUID(),
+                role: "system",
+                content: `Background task ${taskId} failed: ${(error as Error).message}`,
+                timestamp: finishedAt,
+              },
+            ])
+          }
+        }
+      })()
+
+      setError(null)
+      return true
+    },
+    [formatShellResult, runShellCommand, setBackgroundTasks, setMessages, setError],
+  )
+
+  const interactive = useInteractiveController({
+    inputValue,
+    setInputValue,
+    messages,
+    setMessages,
+    isRunning: status === "running",
+    performSubmit,
+    onAbort: () => {
+      if (!isMountedRef.current) {
+        return
+      }
+      if (status === "running") {
+        setStatus("idle")
+        setError("Generation cancelled.")
+      }
+    },
+    onRewind: () => {
+      if (!isMountedRef.current) {
+        return
+      }
+      setStatus("idle")
+      setError(null)
+    },
+    onBackgroundRequest: handleBackgroundRequest,
+  })
+
+  const { thinkingEnabled, permissionMode, historySearch } = interactive
+  useEffect(() => {
+    thinkingEnabledRef.current = thinkingEnabled
+  }, [thinkingEnabled])
+
+
 
   return (
     <box flexDirection="column" flexGrow={1} padding={1} gap={1} style={{ backgroundColor: theme.background }}>
@@ -578,6 +880,51 @@ export function App() {
           })}
       </scrollbox>
 
+      {historySearch.active ? (
+        <box
+          style={{
+            border: ["left"],
+            borderColor: theme.headerBorder,
+            backgroundColor: theme.header,
+            padding: 1,
+          }}
+        >
+          <text
+            fg={theme.headerAccent}
+            attributes={TextAttributes.BOLD}
+            content={`reverse-search: ${historySearch.query || '...'}${historySearch.match ? ` -> ${historySearch.match}` : ''}`}
+          />
+          <text fg={theme.statusFg} attributes={TextAttributes.DIM} content="Esc to cancel, Ctrl+R to search older matches" />
+        </box>
+      ) : null}
+
+      <box
+        flexDirection="row"
+        gap={3}
+        style={{ border: ["left"], borderColor: theme.bodyBorder, padding: 1, backgroundColor: theme.background }}
+      >
+        <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Thinking - ${thinkingEnabled ? 'on' : 'off'}`} />
+        <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Permissions - ${permissionMode}`} />
+        <text fg={theme.statusFg} attributes={TextAttributes.DIM} content={`Status - ${status}`} />
+      </box>
+
+      {backgroundTasks.length > 0 ? (
+        <box
+          flexDirection="column"
+          style={{ border: ["left"], borderColor: theme.bodyBorder, padding: 1, backgroundColor: theme.background }}
+        >
+          <text fg={theme.headerAccent} attributes={TextAttributes.BOLD} content="Background tasks" />
+          {backgroundTasks.slice(-5).map((task) => (
+            <text
+              key={task.id}
+              fg={theme.statusFg}
+              attributes={TextAttributes.DIM}
+              content={`${task.id.slice(0, 8)} [${task.status}${task.exitCode !== null ? `:${task.exitCode}` : ''}] ${task.command}`}
+            />
+          ))}
+        </box>
+      ) : null}
+
       <box
         flexDirection="column"
         gap={0}
@@ -593,8 +940,8 @@ export function App() {
       >
         <input
           value={inputValue}
-          onInput={setInputValue}
-          onSubmit={handleSubmit}
+          onInput={interactive.handleInput}
+          onSubmit={interactive.handleSubmit}
           focused
           style={{
             // backgroundColor: theme.inputBg,

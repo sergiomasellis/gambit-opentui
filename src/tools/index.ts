@@ -188,6 +188,9 @@ const patchFileTool = tool<typeof patchFileSchema, string>({
       const isRename = Boolean(resolvedOld && resolvedOld !== resolvedNew);
       const relativeResolvedNew = relativeWorkspacePath(resolvedNew);
 
+      // Normalize path separators in messages to POSIX style for cross-platform consistency
+      const toPosix = (p: string) => p.split(path.sep).join("/");
+
       if (isRename && resolvedOld) {
         const existingOld = Bun.file(resolvedOld);
         if (await existingOld.exists()) {
@@ -196,7 +199,7 @@ const patchFileTool = tool<typeof patchFileSchema, string>({
       }
 
       if (isRename && relativeOld) {
-        results.push(`Moved ${relativeOld} -> ${relativeResolvedNew} via patch.`);
+        results.push(`Moved ${toPosix(relativeOld)} -> ${toPosix(relativeResolvedNew)} via patch.`);
       } else if (baseExists) {
         results.push(`Updated ${relativeResolvedNew} via patch.`);
       } else {
