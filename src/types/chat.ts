@@ -9,5 +9,7 @@ export interface UIMessage {
   metadata?: {
     toolCallId?: string;
     toolName?: string;
+    toolArgs?: unknown;
+    toolResult?: unknown;
   };
 }

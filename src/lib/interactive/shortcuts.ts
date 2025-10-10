@@ -59,11 +59,17 @@ export function matchShortcut(key: ParsedKey): ShortcutMatch | null {
       }
       break
     }
-    case "tab": {
-      if (key.shift) {
+    case "tab":
+    case "backtab": {
+      const isShiftTab =
+        key.shift ||
+        key.name === "backtab" ||
+        /^\u001b\[[0-9;]*Z$/.test(key.sequence)
+
+      if (isShiftTab && !key.ctrl && !key.meta && !key.option) {
         return { action: "cycle-permission", preventDefault: true }
       }
-      if (!key.ctrl && !key.meta) {
+      if (!isShiftTab && !key.ctrl && !key.meta && !key.option) {
         return { action: "toggle-thinking", preventDefault: true }
       }
       break

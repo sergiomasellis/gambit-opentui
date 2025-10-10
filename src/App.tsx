@@ -1,9 +1,7 @@
-import { TextAttributes, type ParsedKey, type ScrollBoxRenderable } from "@opentui/core"
+﻿import { TextAttributes, type ParsedKey, type ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard } from "@opentui/react"
 import { streamText } from "ai"
 import { randomUUID } from "node:crypto"
-import { mkdir, appendFile } from "node:fs/promises"
-import path from "node:path"
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { defaultModel, MAX_SHELL_OUTPUT, workspaceRoot } from "./config"
@@ -12,8 +10,10 @@ import { createModelSelector, type ReasoningEffort } from "./lib/model"
 import { useModelPicker } from "./lib/modelPicker"
 import { truncate } from "./lib/text"
 import { useInteractiveController } from "./lib/interactive/controller"
+import { appendSessionEntry } from "./lib/interactive/sessionHistory"
 import { loadSystemPrompt } from "./lib/prompt"
 import { executeSlashCommand, type SlashCommandExecution } from "./lib/slashCommands"
+import { appendMemoryEntry } from "./lib/memory"
 import type { ModelListItem } from "./lib/openrouterModels"
 import { theme, rolePresentation } from "./ui/theme"
 import { Markdown } from "./ui/Markdown"
@@ -295,7 +295,10 @@ ${text}`
 
       try {
         const streamPromise = (async () => {
-          const toolState = new Map<string, { messageId?: string; toolName: string; args: unknown }>()
+          const toolState = new Map<
+            string,
+            { messageId?: string; toolName: string; args: unknown; result?: unknown }
+          >()
 
           const upsertToolMessage = (
             toolCallId: string,
@@ -308,15 +311,16 @@ ${text}`
             const previous = toolState.get(toolCallId)
             const toolName = update.toolName ?? previous?.toolName ?? "unknown"
             const args = update.args ?? previous?.args ?? {}
+            const result = update.result ?? previous?.result
             const payload: ToolEventPayload = {
               toolName,
               args,
-              result: update.result,
+              result,
               toolCallId,
             }
 
             const messageId = previous?.messageId ?? randomUUID()
-            toolState.set(toolCallId, { messageId, toolName, args })
+            toolState.set(toolCallId, { messageId, toolName, args, result })
 
             setMessages((prev) => {
               const existingIndex = prev.findIndex(
@@ -330,6 +334,8 @@ ${text}`
                 metadata: {
                   toolCallId,
                   toolName,
+                  toolArgs: args,
+                  toolResult: result,
                 },
                 timestamp: previousMessage?.timestamp ?? new Date(),
               }
@@ -478,8 +484,10 @@ ${text}`
           }
         }
 
+        const trimmedFinalText = finalText.trim()
+
         if (assistantMessageAdded) {
-          if (!finalText.trim()) {
+          if (!trimmedFinalText) {
             setMessages((prev) => prev.filter((message) => message.id !== assistantId))
           } else if (finalText !== composeAssistantContent(assistantContent)) {
             const nextContent = finalText
@@ -487,12 +495,25 @@ ${text}`
               prev.map((message) => (message.id === assistantId ? { ...message, content: nextContent } : message)),
             )
           }
-        } else if (finalText.trim()) {
+        } else if (trimmedFinalText) {
           assistantMessageAdded = true
           setMessages((prev) => [
             ...prev,
             { id: assistantId, role: "assistant", content: finalText, timestamp: new Date() },
           ])
+        }
+
+        if (trimmedFinalText) {
+          try {
+            await appendSessionEntry({
+              id: assistantId,
+              role: "assistant",
+              content: finalText,
+              timestamp: new Date().toISOString(),
+            })
+          } catch (historyError) {
+            console.warn("Failed to persist assistant history entry", historyError)
+          }
         }
       } catch (streamError) {
         if (isMountedRef.current && assistantMessageAdded) {
@@ -639,11 +660,7 @@ ${text}`
         }
 
         try {
-          const memoryDir = path.join(workspaceRoot, ".gambit")
-          await mkdir(memoryDir, { recursive: true })
-          const memoryFilePath = path.join(memoryDir, "gambit.md")
-          await appendFile(memoryFilePath, `${memoryText}
-`, "utf8")
+          await appendMemoryEntry(memoryText)
           const userMessage: UIMessage = {
             id: randomUUID(),
             role: "user",
@@ -955,7 +972,7 @@ ${text}`
         </box>
         {/* <box flexDirection="column">
           <text fg={theme.statusFg} attributes={status === "running" ? TextAttributes.BLINK : TextAttributes.DIM}>
-            Status · {status === "running" ? "thinking…" : "idle"}
+            Status · {status === "running" ? "thinking€¦" : "idle"}
           </text>
         </box> */}
         {/* <box>

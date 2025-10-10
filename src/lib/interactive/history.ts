@@ -1,15 +1,13 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import path from "node:path"
+﻿import { randomUUID } from "node:crypto"
 
-import { workspaceRoot } from "../../config"
+import {
+  appendSessionEntry,
+  getCurrentSession,
+  loadUserHistoryEntries,
+  type SessionHistoryEntry,
+} from "./sessionHistory"
 
-const HISTORY_FILENAME = "history.json"
-const HISTORY_DIRECTORY = path.join(workspaceRoot, ".gambit")
-const HISTORY_PATH = path.join(HISTORY_DIRECTORY, HISTORY_FILENAME)
-
-interface SerializedHistory {
-  entries: string[]
-}
+const MAX_HISTORY_ENTRIES = 1000
 
 export interface HistoryMatch {
   value: string
@@ -19,29 +17,40 @@ export interface HistoryMatch {
 export class InteractiveHistory {
   private items: string[]
   private cursor: number | null
+  private pendingEntries: SessionHistoryEntry[]
 
-  constructor(entries: string[]) {
+  private constructor(entries: string[]) {
     this.items = [...entries]
     this.cursor = null
+    this.pendingEntries = []
   }
 
   static async load(): Promise<InteractiveHistory> {
     try {
-      const content = await readFile(HISTORY_PATH, "utf8")
-      const parsed = JSON.parse(content) as SerializedHistory
-      if (Array.isArray(parsed.entries)) {
-        return new InteractiveHistory(parsed.entries.filter((entry) => typeof entry === "string"))
-      }
+      await getCurrentSession()
+      const entries = await loadUserHistoryEntries(MAX_HISTORY_ENTRIES)
+      return new InteractiveHistory(entries)
     } catch (error) {
-      // ignore missing or malformed history files; start with empty history
+      return new InteractiveHistory([])
     }
-    return new InteractiveHistory([])
   }
 
   async persist(): Promise<void> {
-    const payload: SerializedHistory = { entries: this.items.slice(-1000) }
-    await mkdir(HISTORY_DIRECTORY, { recursive: true })
-    await writeFile(HISTORY_PATH, JSON.stringify(payload, null, 2), "utf8")
+    if (!this.pendingEntries.length) {
+      return
+    }
+
+    const entriesToWrite = [...this.pendingEntries]
+    this.pendingEntries = []
+
+    try {
+      for (const entry of entriesToWrite) {
+        await appendSessionEntry(entry)
+      }
+    } catch (error) {
+      this.pendingEntries = [...entriesToWrite, ...this.pendingEntries]
+      throw error
+    }
   }
 
   add(entry: string): void {
@@ -54,6 +63,12 @@ export class InteractiveHistory {
       return
     }
     this.items.push(trimmed)
+    this.pendingEntries.push({
+      id: randomUUID(),
+      role: "user",
+      content: trimmed,
+      timestamp: new Date().toISOString(),
+    })
     this.cursor = null
   }
 

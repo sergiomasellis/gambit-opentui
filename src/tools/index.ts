@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { mkdir, unlink } from "node:fs/promises";
-import path from "node:path";
+import * as path from "node:path";
 import { z } from "zod";
 
 import { MAX_FILE_CHARS, MAX_SHELL_OUTPUT, workspaceRoot } from "../config";

@@ -1,32 +1,3 @@
 {
-  "entries": [
-    "i",
-    "hi",
-    "/clear",
-    "hi",
-    "/help",
-    "/models",
-    "hi",
-    "whats your name?",
-    "review and commit the git changes. also push them",
-    "hi",
-    "whats in this repo?",
-    "/models",
-    "does gambit have a /model command?",
-    "/model",
-    "hi",
-    "/model",
-    "hi",
-    "commit all the changes using conventional commit messages and push to repo",
-    "/help",
-    "/model",
-    "/help",
-    "hi",
-    "/help",
-    "hi",
-    "/model",
-    "hi",
-    "save all updates to git using conventional commit messages and push",
-    "save updates to git using conventional commit messages and push"
-  ]
+  "entries": []
 }
